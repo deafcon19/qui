@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -19,7 +20,19 @@ type admissionPending struct {
 	CrossSeed            *CrossSeedRequest
 	SeasonPack           *SeasonPackApplyRequest
 	SeasonPackAutonomous bool
+	TargetsResolved      bool
+	ResolvedTargets      []int
+	CompletedInstanceIDs []int
+	AddedInstanceIDs     []int
+	RetryAfter           map[int]time.Time
+	AnySuccess           bool
+	NeedsSeasonPack      bool
 }
+
+var admissionQueueMu sync.Mutex
+
+type admissionTargetAttemptKey struct{}
+type admissionAddedReceiversKey struct{}
 
 func admissionQueueDir() (string, error) {
 	if configured := strings.TrimSpace(os.Getenv("QUI_CROSS_SEED_GATE_QUEUE_DIR")); configured != "" {
@@ -33,6 +46,8 @@ func admissionQueueDir() (string, error) {
 }
 
 func (s *Service) queueAdmission(item admissionPending) error {
+	admissionQueueMu.Lock()
+	defer admissionQueueMu.Unlock()
 	var data bytes.Buffer
 	if err := gob.NewEncoder(&data).Encode(item); err != nil {
 		return fmt.Errorf("encode deferred cross-seed: %w", err)
@@ -51,12 +66,16 @@ func (s *Service) queueAdmission(item admissionPending) error {
 	} else if !os.IsNotExist(err) {
 		return err
 	}
-	temp, err := os.CreateTemp(directory, ".pending-*")
+	return writeAdmissionBytes(finalPath, data.Bytes(), time.Time{})
+}
+
+func writeAdmissionBytes(finalPath string, data []byte, queuedAt time.Time) error {
+	temp, err := os.CreateTemp(filepath.Dir(finalPath), ".pending-*")
 	if err != nil {
 		return err
 	}
 	defer os.Remove(temp.Name())
-	if _, err := temp.Write(data.Bytes()); err != nil {
+	if _, err := temp.Write(data); err != nil {
 		_ = temp.Close()
 		return err
 	}
@@ -67,14 +86,67 @@ func (s *Service) queueAdmission(item admissionPending) error {
 	if err := temp.Close(); err != nil {
 		return err
 	}
+	if !queuedAt.IsZero() {
+		if err := os.Chtimes(temp.Name(), queuedAt, queuedAt); err != nil {
+			return err
+		}
+	}
 	return os.Rename(temp.Name(), finalPath)
 }
 
+func readAdmission(path string) (admissionPending, time.Time, error) {
+	var item admissionPending
+	file, err := os.Open(path)
+	if err != nil {
+		return item, time.Time{}, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return item, time.Time{}, err
+	}
+	err = gob.NewDecoder(file).Decode(&item)
+	return item, info.ModTime(), err
+}
+
+func saveAdmission(path string, item admissionPending, queuedAt time.Time) error {
+	var data bytes.Buffer
+	if err := gob.NewEncoder(&data).Encode(item); err != nil {
+		return err
+	}
+	return writeAdmissionBytes(path, data.Bytes(), queuedAt)
+}
+
 func (s *Service) admissionQueueWorker(ctx context.Context) {
+	ctx, cancel := context.WithCancel(ctx)
+	workers := map[int]chan []string{}
+	slots := make(chan struct{}, 3)
+	var running sync.WaitGroup
+	defer func() { cancel(); running.Wait() }()
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	for {
-		s.drainAdmissionQueue(ctx)
+		jobs, err := s.admissionJobs(ctx)
+		if err != nil {
+			log.Debug().Err(err).Msg("Cannot refresh deferred cross-seed targets")
+		}
+		for id, paths := range jobs {
+			mailbox := workers[id]
+			if mailbox == nil {
+				mailbox = make(chan []string, 1)
+				workers[id] = mailbox
+				running.Go(func() { s.admissionTargetWorker(ctx, id, mailbox, slots) })
+			}
+			// Keep one fresh snapshot per target rather than an accumulating work list.
+			select {
+			case <-mailbox:
+			default:
+			}
+			select {
+			case mailbox <- paths:
+			default:
+			}
+		}
 		select {
 		case <-ctx.Done():
 			return
@@ -83,67 +155,13 @@ func (s *Service) admissionQueueWorker(ctx context.Context) {
 	}
 }
 
-func (s *Service) drainAdmissionQueue(ctx context.Context) {
-	directory, err := admissionQueueDir()
-	if err != nil {
-		log.Error().Err(err).Msg("Cannot locate deferred cross-seed queue")
-		return
-	}
-	entries, err := os.ReadDir(directory)
-	if os.IsNotExist(err) {
-		return
-	}
-	if err != nil {
-		log.Error().Err(err).Msg("Cannot read deferred cross-seed queue")
-		return
-	}
-	for _, entry := range entries {
-		if ctx.Err() != nil {
-			return
-		}
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".gob" {
-			continue
-		}
-		path := filepath.Join(directory, entry.Name())
-		data, err := os.ReadFile(path)
-		if err != nil {
-			log.Error().Err(err).Str("file", entry.Name()).Msg("Cannot read deferred cross-seed")
-			continue
-		}
-		var item admissionPending
-		if err := gob.NewDecoder(bytes.NewReader(data)).Decode(&item); err != nil {
-			log.Error().Err(err).Str("file", entry.Name()).Msg("Cannot decode deferred cross-seed")
-			continue
-		}
-		attemptCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-		settled := false
-		if item.CrossSeed != nil {
-			response, applyErr := s.CrossSeed(attemptCtx, item.CrossSeed)
-			settled = applyErr == nil && response != nil && !crossSeedNeedsRetry(response)
-			if applyErr != nil {
-				log.Warn().Err(applyErr).Str("file", entry.Name()).Msg("Deferred cross-seed retry failed")
-			}
-		} else if item.SeasonPack != nil {
-			item.SeasonPack.autonomous = item.SeasonPackAutonomous
-			response, applyErr := s.ApplySeasonPackWebhook(attemptCtx, item.SeasonPack)
-			settled = applyErr == nil && response != nil && response.Reason != "queued"
-			if applyErr != nil {
-				log.Warn().Err(applyErr).Str("file", entry.Name()).Msg("Deferred season-pack retry failed")
-			}
-		}
-		cancel()
-		if settled {
-			if err := os.Remove(path); err != nil {
-				log.Error().Err(err).Str("file", entry.Name()).Msg("Cannot remove settled cross-seed request")
-			}
-		}
-	}
-}
-
 func crossSeedNeedsRetry(response *CrossSeedResponse) bool {
+	if len(response.Results) == 0 {
+		return true
+	}
 	for _, result := range response.Results {
 		switch result.Status {
-		case "queued", "error", "hardlink_error", "reflink_error":
+		case "queued", "error", "hardlink_error", "reflink_error", crossSeedUnavailableStatus:
 			return true
 		default:
 		}

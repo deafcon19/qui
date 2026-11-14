@@ -17,13 +17,12 @@ import (
 
 type admissionHeldKey struct{}
 
+type admissionScope []string
+
 // acquireAdmission holds the external route lock from candidate discovery through
 // the qBittorrent add. When WIP owns the lock, discovery waits until its final
 // links exist, so all save-path decisions use the completed placement.
 func (s *Service) acquireAdmission(ctx context.Context, instanceIDs []int) (context.Context, func(), bool, error) {
-	if ctx.Value(admissionHeldKey{}) != nil {
-		return ctx, func() {}, true, nil
-	}
 	command := strings.TrimSpace(os.Getenv("QUI_CROSS_SEED_GATE_COMMAND"))
 	if command == "" {
 		return ctx, func() {}, true, nil
@@ -37,6 +36,14 @@ func (s *Service) acquireAdmission(ctx context.Context, instanceIDs []int) (cont
 		return ctx, nil, false, err
 	}
 	names := admissionRouteNames(configured, instances)
+	if held, ok := ctx.Value(admissionHeldKey{}).(admissionScope); ok {
+		for _, name := range names {
+			if !slices.Contains(held, name) {
+				return ctx, nil, false, errors.New("cross-seed admission route changed; retry with a fresh lease")
+			}
+		}
+		return ctx, func() {}, true, nil
+	}
 	type heldCommand struct {
 		cmd   *exec.Cmd
 		stdin io.WriteCloser
@@ -83,7 +90,7 @@ func (s *Service) acquireAdmission(ctx context.Context, instanceIDs []int) (cont
 			return ctx, nil, false, fmt.Errorf("cross-seed gate for %s returned %q", name, strings.TrimSpace(line))
 		}
 	}
-	return context.WithValue(ctx, admissionHeldKey{}, true), release, true, nil
+	return context.WithValue(ctx, admissionHeldKey{}, admissionScope(names)), release, true, nil
 }
 
 func (s *Service) admissionInstances(ctx context.Context, instanceIDs []int) ([]*models.Instance, error) {
@@ -101,6 +108,19 @@ func (s *Service) admissionInstances(ctx context.Context, instanceIDs []int) ([]
 				return nil, fmt.Errorf("resolve instance %d for cross-seed gate: %w", id, err)
 			}
 			instances = append(instances, instance)
+		}
+	}
+	// A routed add also mutates its receiver, even when only the source was requested.
+	for _, instance := range slices.Clone(instances) {
+		if instance == nil {
+			continue
+		}
+		route, _, err := s.savedRouteOf(ctx, instance.ID)
+		if err != nil {
+			return nil, fmt.Errorf("resolve admission receiver for %d: %w", instance.ID, err)
+		}
+		if route != nil && route.crossSeed != nil {
+			instances = append(instances, route.crossSeed)
 		}
 	}
 	return instances, nil
@@ -127,5 +147,5 @@ func admissionRouteNames(configured string, instances []*models.Instance) []stri
 		}
 	}
 	sort.Strings(names)
-	return names
+	return slices.Compact(names)
 }

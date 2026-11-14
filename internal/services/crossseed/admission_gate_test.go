@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -83,4 +84,28 @@ func TestAdmissionGateDefersAndQueuePersists(t *testing.T) {
 	var decoded admissionPending
 	require.NoError(t, gob.NewDecoder(bytes.NewReader(data)).Decode(&decoded))
 	require.Equal(t, item.CrossSeed, decoded.CrossSeed)
+}
+
+func TestAdmissionGateCoversRoutedReceiverAndRejectsScopeExpansion(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fixture uses a POSIX shell")
+	}
+	r := newRoutedRig(t, false)
+	command := filepath.Join(t.TempDir(), "gate")
+	require.NoError(t, os.WriteFile(command, []byte("#!/bin/sh\nprintf '%s\\n' \"$1\" >> \"$0.count\"\nprintf 'READY\\n'\ncat >/dev/null\n"), 0o600))
+	require.NoError(t, os.Chmod(command, 0o700))
+	t.Setenv("QUI_CROSS_SEED_GATE_COMMAND", command)
+	t.Setenv("QUI_CROSS_SEED_GATE_INSTANCES", "lib:node-a,seeds:node-b")
+	ctx, release, ready, err := r.svc.acquireAdmission(t.Context(), []int{r.source.ID})
+	require.NoError(t, err)
+	require.True(t, ready)
+	require.Equal(t, admissionScope{"node-a", "node-b"}, ctx.Value(admissionHeldKey{}))
+	release()
+	count, err := os.ReadFile(command + ".count")
+	require.NoError(t, err)
+	require.Equal(t, []string{"node-a", "node-b"}, strings.Fields(string(count)))
+	ctx = context.WithValue(t.Context(), admissionHeldKey{}, admissionScope{"node-a"})
+	_, _, ready, err = r.svc.acquireAdmission(ctx, []int{r.source.ID})
+	require.ErrorContains(t, err, "route changed")
+	require.False(t, ready)
 }

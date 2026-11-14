@@ -88,7 +88,8 @@ type CrossSeedResponse struct {
 	TorrentInfo *TorrentInfo `json:"torrent_info,omitempty"`
 	// titleRescueUsed reports that the internal torrent title still differed.
 	// The search result stays private because clients cannot grant this bypass.
-	titleRescueUsed bool
+	titleRescueUsed          bool
+	admissionNeedsSeasonPack bool
 }
 
 // InstanceCrossSeedResult represents the result for a single instance

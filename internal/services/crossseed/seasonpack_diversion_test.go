@@ -70,6 +70,7 @@ func TestCrossSeed_DivertsSeasonPackToAssembly(t *testing.T) {
 		applied           bool
 		wantDiverted      bool
 		wantSuccess       bool
+		deferredTarget    bool
 	}{
 		{
 			name:              "diverts when episode candidates exist and toggle on",
@@ -79,6 +80,13 @@ func TestCrossSeed_DivertsSeasonPackToAssembly(t *testing.T) {
 			applied:           true,
 			wantDiverted:      true,
 			wantSuccess:       true,
+		},
+		{
+			name:              "deferred target waits for other targets before assembly",
+			automationEnabled: true,
+			libraryTorrents:   episodeTorrents,
+			libraryFiles:      episodeFiles,
+			deferredTarget:    true,
 		},
 		{
 			name:              "no diversion when toggle off",
@@ -165,7 +173,11 @@ func TestCrossSeed_DivertsSeasonPackToAssembly(t *testing.T) {
 			}
 
 			withLinkAdder(svc)
-			resp, err := svc.CrossSeed(context.Background(), &CrossSeedRequest{
+			ctx := context.Background()
+			if tt.deferredTarget {
+				ctx = context.WithValue(ctx, admissionTargetAttemptKey{}, true)
+			}
+			resp, err := svc.CrossSeed(ctx, &CrossSeedRequest{
 				TorrentData:            packB64,
 				TargetInstanceIDs:      []int{instance.ID},
 				FindIndividualEpisodes: true,
@@ -176,6 +188,7 @@ func TestCrossSeed_DivertsSeasonPackToAssembly(t *testing.T) {
 				},
 			})
 			require.NoError(t, err)
+			require.Equal(t, tt.deferredTarget, resp.admissionNeedsSeasonPack)
 
 			if !tt.wantDiverted {
 				require.Nil(t, diverted, "season pack apply should not have been invoked")

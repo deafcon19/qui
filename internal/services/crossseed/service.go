@@ -4328,6 +4328,9 @@ func (s *Service) findCandidates(ctx context.Context, req *FindCandidatesRequest
 			var err error
 			instance, err = s.instanceStore.Get(ctx, instanceID)
 			if err != nil {
+				if ctx.Value(admissionTargetAttemptKey{}) != nil {
+					return nil, fmt.Errorf("load deferred cross-seed instance %d: %w", instanceID, err)
+				}
 				log.Warn().
 					Int("instanceID", instanceID).
 					Err(err).
@@ -4340,6 +4343,9 @@ func (s *Service) findCandidates(ctx context.Context, req *FindCandidatesRequest
 			var err error
 			torrents, err = s.syncManager.GetTorrents(ctx, instanceID, qbt.TorrentFilterOptions{Filter: qbt.TorrentFilterAll})
 			if err != nil {
+				if ctx.Value(admissionTargetAttemptKey{}) != nil {
+					return nil, fmt.Errorf("read deferred cross-seed instance %d: %w", instanceID, err)
+				}
 				log.Warn().
 					Int("instanceID", instanceID).
 					Str("instanceName", instance.Name).
@@ -4357,6 +4363,9 @@ func (s *Service) findCandidates(ctx context.Context, req *FindCandidatesRequest
 				// Re-fetch torrents after recovery to get updated states
 				torrents, err = s.syncManager.GetTorrents(ctx, instanceID, qbt.TorrentFilterOptions{Filter: qbt.TorrentFilterCompleted})
 				if err != nil {
+					if ctx.Value(admissionTargetAttemptKey{}) != nil {
+						return nil, fmt.Errorf("refresh deferred cross-seed instance %d: %w", instanceID, err)
+					}
 					log.Warn().
 						Int("instanceID", instanceID).
 						Str("instanceName", instance.Name).
@@ -4672,6 +4681,11 @@ func (s *Service) CrossSeed(ctx context.Context, req *CrossSeedRequest) (*CrossS
 	// instances that an add gave the torrent in this call, so that a routed add
 	// does not add it to its Cross-seed instance a second time.
 	addedTo := map[int]struct{}{}
+	if receivers, ok := ctx.Value(admissionAddedReceiversKey{}).([]int); ok {
+		for _, id := range receivers {
+			addedTo[id] = struct{}{}
+		}
+	}
 	s.sortSourceInstancesFirst(ctx, candidatesResp.Candidates)
 	for _, candidate := range candidatesResp.Candidates {
 		result := s.processCrossSeedCandidate(ctx, candidate, torrentBytes, torrentHash, meta.HashV2, meta.Name, req, sourceRelease, meta.Files, meta.Info, addedTo)
@@ -4723,7 +4737,11 @@ func (s *Service) CrossSeed(ctx context.Context, req *CrossSeedRequest) (*CrossS
 	// in the library can still be assembled by the season-pack pipeline.
 	if !response.Success && candidatesResp.seasonPackEpisodeCandidates &&
 		!requestRequiresSearchVerification(req) {
-		s.maybeDivertSeasonPack(ctx, req, meta.Name, response)
+		if ctx.Value(admissionTargetAttemptKey{}) != nil {
+			response.admissionNeedsSeasonPack = true
+		} else {
+			s.maybeDivertSeasonPack(ctx, req, meta.Name, response)
+		}
 	}
 
 	return response, nil
