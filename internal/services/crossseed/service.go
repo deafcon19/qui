@@ -24,6 +24,7 @@ import (
 	"io/fs"
 	"iter"
 	"maps"
+	"os"
 	"path"
 	"reflect"
 	"slices"
@@ -592,6 +593,9 @@ func NewService(
 		syncManager:     syncManager,
 		settings:        svc.GetAutomationSettings,
 		partialPoolWake: make(chan partialPoolWake, 100),
+	}
+	if strings.TrimSpace(os.Getenv("QUI_CROSS_SEED_GATE_COMMAND")) != "" {
+		go svc.admissionQueueWorker(context.Background())
 	}
 
 	return svc
@@ -4555,6 +4559,9 @@ func (s *Service) findCandidates(ctx context.Context, req *FindCandidatesRequest
 // It finds existing 100% complete torrents that match the content and adds the new torrent
 // paused to the same location with matching category and ATM state
 func (s *Service) CrossSeed(ctx context.Context, req *CrossSeedRequest) (*CrossSeedResponse, error) {
+	if req == nil {
+		return nil, errors.New("cross-seed request is required")
+	}
 	// A webhook or manual request is one Trigger run. A run that started its
 	// memory of failed route folders earlier keeps it.
 	ctx = withRouteRun(ctx)
@@ -4577,9 +4584,22 @@ func (s *Service) CrossSeed(ctx context.Context, req *CrossSeedRequest) (*CrossS
 	if meta.Info != nil && !meta.Info.HasV1() && meta.HashV2 != "" {
 		torrentHash = meta.HashV2
 	}
-	// With a cached search decision, apply reads the files as search did, also
-	// when the raw name already parses as TV. Ordinary and Manual apply keep the
-	// raw TV identity. Non-TV names still need file-derived structure in either path.
+	var release func()
+	var ready bool
+	ctx, release, ready, err = s.acquireAdmission(ctx, req.TargetInstanceIDs)
+	if err != nil {
+		return nil, err
+	}
+	if !ready {
+		if err := s.queueAdmission(admissionPending{CrossSeed: req}); err != nil {
+			return nil, fmt.Errorf("queue cross-seed until storage settles: %w", err)
+		}
+		return &CrossSeedResponse{Results: []InstanceCrossSeedResult{{Status: "queued", Message: "Waiting for the storage cache or WIP move to settle"}}}, nil
+	}
+	defer release()
+	// Cached search decisions replay search's file-derived reading even when the
+	// raw name already parses as TV; ordinary/manual apply keeps its raw TV
+	// identity. Non-TV names still need file-derived structure in either path.
 	sourceView := s.readApplyTarget(meta.Name, meta.Files, requestHasSearchDecision(req))
 	sourceRelease := sourceView.release
 

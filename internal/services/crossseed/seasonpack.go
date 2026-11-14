@@ -369,6 +369,23 @@ func (s *Service) checkSeasonPackNoThreshold(ctx context.Context, torrentName st
 // ApplySeasonPackWebhook attempts to apply a season pack by selecting the best
 // instance, assembling a link tree from local episode files, and adding the torrent.
 func (s *Service) ApplySeasonPackWebhook(ctx context.Context, req *SeasonPackApplyRequest) (*SeasonPackApplyResponse, error) {
+	if req == nil {
+		return nil, errors.New("season-pack request is required")
+	}
+	var release func()
+	var err error
+	var ready bool
+	ctx, release, ready, err = s.acquireAdmission(ctx, req.InstanceIDs)
+	if err != nil {
+		return nil, err
+	}
+	if !ready {
+		if err := s.queueAdmission(admissionPending{SeasonPack: req, SeasonPackAutonomous: req.autonomous}); err != nil {
+			return nil, fmt.Errorf("queue season pack until storage settles: %w", err)
+		}
+		return &SeasonPackApplyResponse{Reason: "queued", Message: "Waiting for the storage cache or WIP move to settle"}, nil
+	}
+	defer release()
 	prep, reason, message, prepErr := s.prepareSeasonPack(ctx, req.TorrentName, req.TorrentData, req.InstanceIDs, req.autonomous)
 	if prep == nil {
 		if prepErr != nil {
