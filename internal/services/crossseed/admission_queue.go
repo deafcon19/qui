@@ -60,7 +60,19 @@ func (s *Service) queueAdmission(item admissionPending) error {
 		return err
 	}
 	digest := sha256.Sum256(data.Bytes())
-	finalPath := filepath.Join(directory, hex.EncodeToString(digest[:])+".gob")
+	var finalPath string
+	for {
+		finalPath = filepath.Join(directory, hex.EncodeToString(digest[:])+".gob")
+		if err := admissionCancellationError(finalPath); err != nil {
+			if !os.IsNotExist(err) {
+				return err
+			}
+			// A later announcement gets a new identity; stale workers keep the old fence.
+			digest = sha256.Sum256(digest[:])
+			continue
+		}
+		break
+	}
 	if _, err := os.Stat(finalPath); err == nil {
 		return nil
 	} else if !os.IsNotExist(err) {
@@ -70,6 +82,9 @@ func (s *Service) queueAdmission(item admissionPending) error {
 }
 
 func writeAdmissionBytes(finalPath string, data []byte, queuedAt time.Time) error {
+	if err := admissionCancellationError(finalPath); err != nil {
+		return err
+	}
 	temp, err := os.CreateTemp(filepath.Dir(finalPath), ".pending-*")
 	if err != nil {
 		return err
@@ -91,11 +106,17 @@ func writeAdmissionBytes(finalPath string, data []byte, queuedAt time.Time) erro
 			return err
 		}
 	}
-	return os.Rename(temp.Name(), finalPath)
+	return publishAdmission(temp.Name(), finalPath)
 }
 
 func readAdmission(path string) (admissionPending, time.Time, error) {
 	var item admissionPending
+	if err := admissionCancellationError(path); err != nil {
+		if os.IsNotExist(err) {
+			_ = os.Remove(path)
+		}
+		return item, time.Time{}, err
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		return item, time.Time{}, err
@@ -106,6 +127,9 @@ func readAdmission(path string) (admissionPending, time.Time, error) {
 		return item, time.Time{}, err
 	}
 	err = gob.NewDecoder(file).Decode(&item)
+	if cancelErr := admissionCancellationError(path); cancelErr != nil {
+		return item, info.ModTime(), cancelErr
+	}
 	return item, info.ModTime(), err
 }
 

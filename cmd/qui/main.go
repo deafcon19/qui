@@ -83,6 +83,13 @@ multiple qBittorrent instances with support for 10k+ torrents.`,
 
 	rootCmd.AddCommand(RunServeCommand())
 	rootCmd.AddCommand(RunVersionCommand(buildinfo.Version))
+	rootCmd.AddCommand(&cobra.Command{
+		Use: "cross-seed-queue-capabilities", Hidden: true, Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			_, err := fmt.Fprintln(cmd.OutOrStdout(), `{"cancel_requests":true}`)
+			return err
+		},
+	})
 	rootCmd.AddCommand(RunGenerateConfigCommand())
 	rootCmd.AddCommand(RunDBCommand())
 	rootCmd.AddCommand(RunCreateUserCommand())
