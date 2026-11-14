@@ -16,6 +16,7 @@ import (
 )
 
 type admissionHeldKey struct{}
+type admissionWorkerKey struct{}
 
 type admissionScope []string
 
@@ -30,6 +31,11 @@ func (s *Service) acquireAdmission(ctx context.Context, instanceIDs []int) (cont
 	configured := strings.TrimSpace(os.Getenv("QUI_CROSS_SEED_GATE_INSTANCES"))
 	if configured == "" {
 		return ctx, nil, false, errors.New("QUI_CROSS_SEED_GATE_INSTANCES is required when the gate command is configured")
+	}
+	// Fresh arrivals join the durable queue instead of holding earlier routes
+	// while probing every other route ahead of older target-specific work.
+	if ctx.Value(admissionWorkerKey{}) == nil && ctx.Value(admissionHeldKey{}) == nil {
+		return ctx, func() {}, false, nil
 	}
 	instances, err := s.admissionInstances(ctx, instanceIDs)
 	if err != nil {

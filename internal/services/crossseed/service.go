@@ -4603,7 +4603,7 @@ func (s *Service) CrossSeed(ctx context.Context, req *CrossSeedRequest) (*CrossS
 		if err := s.queueAdmission(admissionPending{CrossSeed: req}); err != nil {
 			return nil, fmt.Errorf("queue cross-seed until storage settles: %w", err)
 		}
-		return &CrossSeedResponse{Results: []InstanceCrossSeedResult{{Status: "queued", Message: "Waiting for the storage cache or WIP move to settle"}}}, nil
+		return &CrossSeedResponse{Results: []InstanceCrossSeedResult{{Status: "queued", Message: "Queued for cross-seed processing"}}}, nil
 	}
 	defer release()
 	// Cached search decisions replay search's file-derived reading even when the

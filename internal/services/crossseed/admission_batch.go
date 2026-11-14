@@ -213,6 +213,7 @@ func (s *Service) processAdmissionBatch(ctx context.Context, id int, paths []str
 	}
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
+	ctx = context.WithValue(ctx, admissionWorkerKey{}, true)
 	ctx, release, ready, err := s.acquireAdmission(ctx, admissionBatchTargets(first, id))
 	if err != nil || !ready {
 		log.Debug().Err(err).Int("instanceID", id).Msg("Deferred cross-seed target is not admitted")

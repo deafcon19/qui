@@ -383,7 +383,7 @@ func (s *Service) ApplySeasonPackWebhook(ctx context.Context, req *SeasonPackApp
 		if err := s.queueAdmission(admissionPending{SeasonPack: req, SeasonPackAutonomous: req.autonomous}); err != nil {
 			return nil, fmt.Errorf("queue season pack until storage settles: %w", err)
 		}
-		return &SeasonPackApplyResponse{Reason: "queued", Message: "Waiting for the storage cache or WIP move to settle"}, nil
+		return &SeasonPackApplyResponse{Reason: "queued", Message: "Queued for season-pack processing"}, nil
 	}
 	defer release()
 	prep, reason, message, prepErr := s.prepareSeasonPack(ctx, req.TorrentName, req.TorrentData, req.InstanceIDs, req.autonomous)
